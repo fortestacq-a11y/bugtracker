@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "bugtracker-frontend",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--prefix", "/home/manjula/bugtracker/frontend"],
+      "port": 5173
+    }
+  ]
+}

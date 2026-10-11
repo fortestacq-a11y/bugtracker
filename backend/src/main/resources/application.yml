@@ -1,0 +1,38 @@
+# Decision: JWT signing secret is overridable by env var so the checked-in default
+# is clearly a dev-only value. Generate a real one for any deployment:
+#   openssl rand -base64 48
+# Decision: token TTL is 24h — long enough for a day of work, short enough that a
+# leaked token expires on its own.
+app:
+  jwt:
+    secret: ${JWT_SECRET:dev-only-secret-change-me-0123456789abcdefghijklmnopqrstuvwxyz}
+    ttl-hours: 24
+
+spring:
+  application:
+    name: bugtracker
+
+  datasource:
+    url: jdbc:mysql://localhost:3306/bugtracker?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+    username: buguser
+    password: bugpass
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  jpa:
+    # Decision: ddl-auto update, per plan. No Flyway — the plan says don't add it.
+    hibernate:
+      ddl-auto: update
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQLDialect
+        format_sql: false
+    # Decision: false — no lazy-loading outside a transaction, so services must
+    # be @Transactional and DTO mapping happens inside the transaction.
+    open-in-view: false
+
+server:
+  port: 8080
+
+logging:
+  level:
+    com.example.bugtracker: DEBUG

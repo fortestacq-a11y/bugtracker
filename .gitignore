@@ -1,0 +1,38 @@
+# ---- build output ----------------------------------------------------------
+target/
+build/
+dist/
+*.class
+
+# ---- dependencies ----------------------------------------------------------
+node_modules/
+.pnp
+.pnp.js
+
+# ---- environment / secrets -------------------------------------------------
+.env
+.env.*
+!.env.example
+application-local.yml
+application-prod.yml
+
+# ---- logs ------------------------------------------------------------------
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ---- editor / OS -----------------------------------------------------------
+.idea/
+.vscode/
+*.iml
+*.swp
+.DS_Store
+Thumbs.db
+
+# ---- tooling caches --------------------------------------------------------
+.vite/
+.cache/
+
+# ---- Postman workspace state (not source) ----------------------------------
+.postman/
