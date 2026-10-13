@@ -91,6 +91,17 @@
 			<plugin>
 				<groupId>org.springframework.boot</groupId>
 				<artifactId>spring-boot-maven-plugin</artifactId>
+				<configuration>
+					<!--
+					  Decision: layered jar. The Dockerfile splits BOOT-INF/lib out of
+					  the jar into its own layer, so editing one Java file rebuilds only
+					  a few hundred KB of image instead of the whole ~60MB dependency set.
+					  Requires the loader package introduced in Boot 3.2 (unchanged in 4.x).
+					-->
+					<layers>
+						<enabled>true</enabled>
+					</layers>
+				</configuration>
 			</plugin>
 		</plugins>
 	</build>

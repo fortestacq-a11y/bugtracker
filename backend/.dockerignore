@@ -1,0 +1,13 @@
+# Keep the build context small. The host target/ is a multi-hundred-MB trap: it is
+# never copied (the Dockerfile only COPYs pom.xml and src/) but would still be
+# uploaded to the builder on every build.
+target/
+mvnw
+mvnw.cmd
+.mvn/
+.mvn/wrapper/
+*.iml
+.idea/
+.vscode/
+HELP.md
+scripts/

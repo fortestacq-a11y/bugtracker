@@ -1,22 +1,51 @@
-# Decision: JWT signing secret is overridable by env var so the checked-in default
-# is clearly a dev-only value. Generate a real one for any deployment:
+# Decision: the JWT signing secret has NO default and NO fallback value.
+#
+# It used to default to a checked-in dev string. That was a real vulnerability in
+# any published image: the default is inside application.yml, so anyone who pulled
+# the image could read it and mint a token for any user id — a complete bypass of
+# the membership/role model in AccessControlService.
+#
+# So the default is gone. An unset secret now fails startup in JwtService with an
+# actionable message instead of silently running insecurely. Generate one with:
 #   openssl rand -base64 48
 # Decision: token TTL is 24h — long enough for a day of work, short enough that a
 # leaked token expires on its own.
 app:
   jwt:
-    secret: ${JWT_SECRET:dev-only-secret-change-me-0123456789abcdefghijklmnopqrstuvwxyz}
+    secret: ${JWT_SECRET:}
     ttl-hours: 24
+  # Decision: comma-separated list of allowed browser origins (patterns allowed, e.g.
+  # https://*.up.railway.app). These are NOT patterns for paths — they are the sites
+  # allowed to call this API from a browser.
+  #
+  # Spring's CorsFilter 403s any request whose Origin header is not on this list,
+  # including same-origin requests, because browsers attach Origin to every
+  # POST/PUT/PATCH/DELETE. Leaving this as localhost-only makes every write fail with
+  # 403 as soon as the app is served from another hostname — which is exactly what
+  # happened on first deploy, where registration returned 403 through the nginx proxy.
+  # Set CORS_ALLOWED_ORIGINS in any real deployment.
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173,http://127.0.0.1:5173}
 
 spring:
   application:
     name: bugtracker
 
+  # Decision: every connection setting is env-overridable, but the defaults are
+  # exactly the local-dev values from scripts/db-up.sh. So `mvn spring-boot:run`
+  # on a laptop behaves exactly as before, while the container image gets its
+  # host from compose (DB_HOST=bugtracker-mysql) instead of hardcoding localhost.
   datasource:
-    url: jdbc:mysql://localhost:3306/bugtracker?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
-    username: buguser
-    password: bugpass
+    url: "${DB_URL:jdbc:mysql://localhost:3306/bugtracker?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC}"
+    username: ${DB_USER:buguser}
+    password: ${DB_PASSWORD:bugpass}
     driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      # Decision: retry instead of crash-looping. In compose the API usually
+      # starts before MySQL finishes its first-boot initialisation; without this
+      # the container would die immediately instead of waiting for the DB.
+      initialization-fail-timeout: 60000
+      maximum-pool-size: ${DB_POOL_SIZE:10}
 
   jpa:
     # Decision: ddl-auto update, per plan. No Flyway — the plan says don't add it.
@@ -31,7 +60,11 @@ spring:
     open-in-view: false
 
 server:
-  port: 8080
+  # Decision: Railway (and most PaaS) inject a PORT variable and route traffic to
+  # whatever it says. Explicit SERVER_PORT still wins, so a container that needs a
+  # fixed port can still ask for one, but on a PaaS this resolves to their value.
+  # Tomcat binds 0.0.0.0 by default, so the service is reachable off-container.
+  port: ${SERVER_PORT:${PORT:8080}}
 
 logging:
   level:

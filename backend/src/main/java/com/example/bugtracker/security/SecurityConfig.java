@@ -3,6 +3,7 @@ package com.example.bugtracker.security;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.SecretKeySpec;
 import java.util.List;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
@@ -48,6 +49,9 @@ public class SecurityConfig {
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(a -> a
                         .requestMatchers("/api/auth/register", "/api/auth/login").permitAll()
+                        // Container probe. Public by design and therefore deliberately
+                        // returns nothing but a coarse UP/DOWN — see HealthController.
+                        .requestMatchers("/api/health").permitAll()
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                         .anyRequest().authenticated())
                 .oauth2ResourceServer(oauth2 -> oauth2.jwt(Customizer.withDefaults()));
@@ -72,14 +76,30 @@ public class SecurityConfig {
     }
 
     /**
-     * CORS at the security filter level, not per-controller. Decision: only the
-     * Vite dev origin — but the Vite proxy means the browser talks to /api on the
-     * same origin in dev, so this is a safety net for direct calls, not the main path.
+     * CORS at the security filter level, not per-controller.
+     *
+     * <p>Origins come from {@code app.cors.allowed-origins} rather than being hardcoded,
+     * because the default has to change with the deployment. The deceptively important
+     * part: Spring's {@code CorsFilter} rejects <em>any</em> request carrying an
+     * {@code Origin} header that is not allowlisted — it returns 403 before the request
+     * ever reaches a controller — and browsers send {@code Origin} on every POST, PUT,
+     * PATCH and DELETE, <em>including same-origin ones</em>. So a hardcoded
+     * localhost-only allowlist makes every write fail with 403 the moment the app is
+     * served from any other hostname, even though nginx is proxying the call
+     * same-origin. Local development hid this completely: the Vite dev server genuinely
+     * is localhost:5173, so it was the one origin that happened to be allowed.
+     *
+     * <p>Patterns rather than plain origins because PaaS hosts are generated
+     * ({@code https://<service>-production.up.railway.app}) and change on redeploy; a
+     * {@code https://*.up.railway.app} pattern survives that. Note this is a list of
+     * patterns, not {@code *}: {@code allowCredentials} is enabled, and the browser
+     * refuses wildcarded credentialed origins anyway.
      */
     @Bean
-    public CorsConfigurationSource corsConfigurationSource() {
+    public CorsConfigurationSource corsConfigurationSource(
+            @Value("${app.cors.allowed-origins}") List<String> allowedOriginPatterns) {
         CorsConfiguration config = new CorsConfiguration();
-        config.setAllowedOrigins(List.of("http://localhost:5173", "http://127.0.0.1:5173"));
+        config.setAllowedOriginPatterns(allowedOriginPatterns);
         config.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
         config.setAllowedHeaders(List.of("Authorization", "Content-Type"));
         config.setAllowCredentials(true);

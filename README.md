@@ -27,6 +27,22 @@ Full-stack issue tracking system built with **Spring Boot 4 / Java 21**, **MySQL
 - **Stateless Bearer JWT** issued and verified using Nimbus JOSE JWT bundled within `spring-boot-starter-oauth2-resource-server` (zero third-party JWT dependencies).
 - **BCrypt password hashing** (cost factor 12) for all stored credentials.
 - **CSRF is disabled** because tokens are passed via HTTP `Authorization: Bearer <token>` headers instead of browser cookies.
+- **The JWT signing secret is mandatory and has no default.** `app.jwt.secret` resolves
+  from the `JWT_SECRET` environment variable only. If it is missing, shorter than the
+  32-byte HS256 minimum, or still set to the old development placeholder, startup fails
+  with an explicit message instead of running with a guessable key.
+
+  > Why this is not a convenience default: the secret lives in `application.yml`, which
+  > ships inside the published Docker image. A committed default would therefore be
+  > public knowledge, and anyone could sign a token for any user id — which bypasses
+  > the entire membership and role model below. Refusing to start is the only safe
+  > behaviour, because a service running with a known key looks completely healthy.
+
+  ```bash
+  # local dev
+  export JWT_SECRET="$(openssl rand -base64 48)"
+  # container / CI / Railway: set JWT_SECRET as an environment variable or secret
+  ```
 - **Error contract**:
   - `401 Unauthorized`: Missing, expired, or invalid token (frontend clears token and redirects to `/login`).
   - `403 Forbidden`: Authenticated user lacks required project role (frontend shows toast and retains user position).
@@ -86,14 +102,27 @@ Verify the container:
 podman exec -it bugtracker-mysql mysql -ubuguser -pbugpass -e "SHOW TABLES;" bugtracker
 ```
 
-### Step 2: Start Spring Boot Backend
+### Step 2: Set the JWT signing secret
+
+The app **refuses to start without this** — there is deliberately no built-in
+default, because a default baked into a published image means anyone can mint a
+valid token for any user. Generate one:
+
+```bash
+export JWT_SECRET="$(openssl rand -base64 48)"
+
+# no openssl installed? (common on minimal Fedora):
+export JWT_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+```
+
+### Step 3: Start Spring Boot Backend
 ```bash
 cd backend
 ./mvnw spring-boot:run
 ```
 Backend will start on `http://localhost:8080`.
 
-### Step 3: Seed Sample Data
+### Step 4: Seed Sample Data
 ```bash
 ./scripts/seed.sh
 ```
@@ -102,7 +131,7 @@ Creates:
 - `bob@example.com` / `password123` (`DEVELOPER` in CORE, `VIEWER` in MOB)
 - `charlie@example.com` / `password123` (`REPORTER` in CORE, **No access** to MOB)
 
-### Step 4: Start React Frontend
+### Step 5: Start React Frontend
 ```bash
 cd frontend
 npm install
@@ -110,9 +139,149 @@ npm run dev
 ```
 Open `http://localhost:5173` in your browser.
 
+> **Prefer containers?** See [§5 Container Images](#5-container-images) — it builds both
+> tiers as images and brings up the same three services (db + api + web) in one command.
+
 ---
 
-## 5. Verification Test: Multi-Tenant Project Isolation
+## 5. Container Images
+
+Two images, both multi-stage builds:
+
+| Image | Built from | Runtime | Contents |
+|---|---|---|---|
+| `bugtracker-api` | `backend/Dockerfile` | `eclipse-temurin:21-jre-alpine` | Spring Boot API only — no Maven, no source, no shell tools |
+| `bugtracker-web` | `frontend/Dockerfile` | `nginx:1.27-alpine` | Compiled Vite bundle + nginx that serves it and proxies `/api` to the API |
+
+`docker-compose.yml` adds the third piece, MySQL 8.4, reusing the same image, credentials
+and named volume (`bugtracker-mysql-data`) as `scripts/db-up.sh`, so data is shared
+between host-run and compose-run setups.
+
+### Build
+
+```bash
+./scripts/docker-build.sh
+```
+
+Or invoke the builder directly (context is the component directory, not the repo root):
+
+```bash
+podman build -f backend/Dockerfile  -t localhost/bugtracker-api:dev backend
+podman build -f frontend/Dockerfile -t localhost/bugtracker-web:dev frontend
+```
+
+To run the backend test suite inside the image build (skipped by default for speed):
+
+```bash
+RUN_TESTS=true ./scripts/docker-build.sh
+```
+
+Or run them directly on the host — the suite is self-contained and uses an in-memory
+H2 database, so it never touches the MySQL container:
+
+```bash
+cd backend && ./mvnw test
+```
+
+### Run the whole stack
+
+```bash
+podman compose up -d --build      # or: docker compose up -d --build
+```
+
+| Service | URL | Notes |
+|---|---|---|
+| Web (nginx) | http://localhost:5173 | Serves the SPA, reverse-proxies `/api` internally |
+| API | http://localhost:8080/api/health | `{"status":"UP","database":"UP"}` when ready |
+| MySQL | `localhost:3306` | `podman exec bugtracker-mysql mysql -ubuguser -pbugpass bugtracker` |
+
+Seed data works unchanged against the containerised API:
+
+```bash
+API_URL=http://localhost:8080 ./scripts/seed.sh
+```
+
+Tear down with `podman compose down` (keeps data) or `podman compose down -v`
+(**deletes** the MySQL volume).
+
+> **Note:** `podman compose` / `docker compose` requires a compose provider
+> (`podman-compose` or the `docker-compose` plugin). The images themselves build and run
+> fine without one — see the manual `run` commands printed by `scripts/docker-push.sh`.
+
+### Push to Docker Hub
+
+```bash
+cp .env.example .env
+# edit .env:  REGISTRY=docker.io/<your-username>
+
+./scripts/docker-build.sh         # tags docker.io/<you>/bugtracker-api and -web
+podman login docker.io            # or: docker login
+./scripts/docker-push.sh          # pushes the version tag and :latest
+```
+
+Both scripts accept overrides instead of editing `.env`:
+
+```bash
+REGISTRY=docker.io/manjula VERSION=0.1.0 ./scripts/docker-build.sh
+REGISTRY=docker.io/manjula VERSION=0.1.0 ./scripts/docker-push.sh
+```
+
+`VERSION` defaults to `git describe --tags --always --dirty`, so image tags stay
+traceable to a commit.
+
+### Configuration
+
+Every deployment-specific value is an environment variable. Defaults are the local-dev
+values, which is why `mvn spring-boot:run` still works with no `.env` at all.
+
+| Variable | Default | Used by |
+|---|---|---|
+| `DB_URL` | `jdbc:mysql://localhost:3306/bugtracker?...` | API datasource |
+| `DB_USER` / `DB_PASSWORD` | `buguser` / `bugpass` | API datasource |
+| `DB_POOL_SIZE` | `10` | HikariCP max pool size |
+| `SERVER_PORT` | `8080` | API listen port |
+| `JWT_SECRET` | *(none — required)* | **must be set or startup fails** |
+| `API_UPSTREAM` | `http://backend:8080` | nginx `/api` proxy target |
+
+> ⚠️ **`JWT_SECRET` has no default.** If you skip it the API will not start at all —
+> that is deliberate, not a misconfiguration. `openssl rand -base64 48`.
+
+### Design notes
+
+- **Layered API image.** The boot jar is exploded with `jarmode=tools` and its
+  `dependencies/`, `spring-boot-loader/`, `snapshot-dependencies/` and `application/`
+  directories are copied as separate layers. Editing one Java file then rebuilds a layer
+  of a few hundred KB rather than the whole ~60MB dependency set.
+- **Non-root.** The API runs as UID `10001`; nginx runs as its default non-root user.
+- **JVM as PID 1.** `ENTRYPOINT` is exec-form, so the JVM receives `SIGTERM` directly
+  and Spring's graceful shutdown runs. Shutdown theme matters most here: an in-flight
+  `PUT /api/issues/{id}` writes its `issue_history` rows in a transaction, and a `SIGKILL`
+  mid-transaction would lose that audit trail.
+- **Startup ordering is explicit.** Compose gates the API on MySQL's *healthcheck*, not
+  on "container started" — `mysqladmin ping` succeeds while first-boot initialisation is
+  still running, which is a classic source of "API crashed on boot" false alarms.
+- **One client code path.** The browser always calls relative `/api/...`; nginx proxies it
+  to the API. This is the same shape as the Vite dev proxy, so production never relies
+  on CORS, and the built bundle needs no per-environment rebuild.
+- **`/api/health` is public and deliberately vague.** It returns only `UP`/`DOWN` (and a
+  503 when the database is unreachable). No version, no datasource URL, no stack traces —
+  those still come from the `@RestControllerAdvice` on the authenticated endpoints.
+
+### What is *not* in these images
+
+- No `target/`, `node_modules/`, `.git` or IDE folders are sent as build context — see the
+  `.dockerignore` in each component directory.
+- No Maven, JDK, Node or npm. The API image is a JRE plus the app's own jars.
+- No `application-test.yml`. That file lives in `src/test/resources`, not
+  `src/main/resources`, so its fixed JWT secret and H2 datasource never reach a
+  published image.
+- No database dump or volume is baked in. Schema comes from Hibernate `ddl-auto: update`
+  at startup; sample data is seeded through the authenticated API (`scripts/seed.sh`),
+  which is also what creates the `project_members` rows correctly.
+
+---
+
+## 6. Verification Test: Multi-Tenant Project Isolation
 
 Run these curl commands to prove that User Charlie cannot read or access User Alice's Mobile App project:
 
@@ -131,7 +300,7 @@ curl -s -H "Authorization: Bearer $CHARLIE_TOKEN" http://localhost:8080/api/issu
 
 ---
 
-## 6. REST API Reference
+## 7. REST API Reference
 
 | Verb | Endpoint | Purpose | Required Role |
 |---|---|---|---|
